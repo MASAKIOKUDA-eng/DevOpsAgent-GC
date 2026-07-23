@@ -2,62 +2,67 @@
 # VPC & ネットワーク構成
 # 
 # 注入された障害:
-# [FAULT-NET-01] Cloud NATなし - プライベートサブネットからインターネットアクセス不可
-# [FAULT-NET-02] 単一リージョンの単一ゾーンのみにサブネット配置 - 可用性の欠如
-# [FAULT-NET-03] Cloud Routerが存在しない - Cloud NATやBGP接続が不可能
+# [FAULT-NET-01] NATゲートウェイなし - プライベートサブネットからインターネットアクセス不可
+# [FAULT-NET-02] 単一リージョンの単一ゾーンのみ - 可用性の欠如
+# [FAULT-NET-03] パブリックサブネットへのルート未設定（Private Google Access無効）
 ################################################################################
 
 # VPCネットワーク
 resource "google_compute_network" "main" {
   name                    = "${var.project_name}-vpc"
-  auto_create_subnetworks = false  # カスタムサブネットモード
+  auto_create_subnetworks = false
   routing_mode            = "REGIONAL"
-
-  # GCPではVPCは暗黙的にグローバル。routing_mode=REGIONALの場合、他リージョンへのルートが伝播されない
 }
 
 ################################################################################
-# サブネット
-# [FAULT-NET-02] 単一ゾーンのみ - Cloud RunやGKEで冗長性が確保できない
+# パブリックサブネット
+# [FAULT-NET-02] 単一リージョンのみ - 冗長性なし
 ################################################################################
-
-# パブリック相当サブネット（外部IPを持つリソース用）
-resource "google_compute_subnetwork" "public" {
-  name          = "${var.project_name}-public-subnet"
+resource "google_compute_subnetwork" "public_a" {
+  name          = "${var.project_name}-public-a"
   ip_cidr_range = "10.0.1.0/24"
   region        = var.gcp_region
   network       = google_compute_network.main.id
 
-  # Private Google Accessが無効 - Google APIへのプライベートアクセス不可
+  # [FAULT-NET-03] Private Google Access無効 - Google APIへのプライベートアクセス不可
   private_ip_google_access = false
-
-  # [FAULT-NET-02] secondary_ip_rangeが未設定 - GKE Pod/Service用のIPレンジなし
 }
 
+# [FAULT-NET-02] 2つ目のサブネット（別ゾーン/リージョン）が存在しない
+# 本来は以下が必要:
+# resource "google_compute_subnetwork" "public_c" {
+#   name          = "${var.project_name}-public-c"
+#   ip_cidr_range = "10.0.2.0/24"
+#   region        = var.gcp_region
+#   network       = google_compute_network.main.id
+# }
+
+################################################################################
 # プライベートサブネット
-# [FAULT-NET-01] Cloud NATが存在しないため、外部アクセスが不可能
-resource "google_compute_subnetwork" "private" {
-  name          = "${var.project_name}-private-subnet"
+# [FAULT-NET-01] Cloud NATが存在しないため、Cloud RunやGCEがインターネットアクセス不可
+################################################################################
+resource "google_compute_subnetwork" "private_a" {
+  name          = "${var.project_name}-private-a"
   ip_cidr_range = "10.0.10.0/24"
   region        = var.gcp_region
   network       = google_compute_network.main.id
 
-  # Private Google Accessが無効
-  # [FAULT-NET-01] Cloud NATもないため、Container Registryからイメージ取得不可
+  # Private Google Access無効 - Artifact RegistryへのアクセスもNG
   private_ip_google_access = false
+}
 
-  # VPC Flow Logsが無効 - ネットワークトラブルシュート不能
-  # log_config {
-  #   aggregation_interval = "INTERVAL_5_SEC"
-  #   flow_sampling        = 0.5
-  #   metadata             = "INCLUDE_ALL_METADATA"
-  # }
+resource "google_compute_subnetwork" "private_c" {
+  name          = "${var.project_name}-private-c"
+  ip_cidr_range = "10.0.11.0/24"
+  region        = var.gcp_region
+  network       = google_compute_network.main.id
+
+  private_ip_google_access = false
 }
 
 ################################################################################
 # Cloud Router & Cloud NAT
-# [FAULT-NET-03] Cloud Routerが存在しない - Cloud NATの前提条件が欠落
-# [FAULT-NET-01] Cloud NATが存在しない - プライベートサブネットから外部通信不可
+# [FAULT-NET-01] Cloud Router/NATが存在しない - プライベートサブネットから外部通信不可
 ################################################################################
 
 # Cloud Routerが存在しない
@@ -86,6 +91,3 @@ resource "google_compute_subnetwork" "private" {
 #     filter = "ERRORS_ONLY"
 #   }
 # }
-
-# → プライベートサブネットのリソースがインターネットアクセス不可
-# → Container Registry/Artifact RegistryからのイメージPull不可

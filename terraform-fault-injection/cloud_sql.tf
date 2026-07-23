@@ -1,14 +1,13 @@
 ################################################################################
-# Cloud SQL for PostgreSQL
+# Cloud SQL for PostgreSQL (RDS相当)
 #
 # 注入された障害:
-# [FAULT-SQL-01] 高可用性(HA)無効 - 単一障害点
-# [FAULT-SQL-02] パブリックIPが有効 - インターネットからDB直接アクセス可能
-# [FAULT-SQL-03] 暗号化がデフォルトのまま - CMEKによるカスタム暗号化なし
+# [FAULT-SQL-01] Multi-AZ(高可用性)無効 - 単一障害点
+# [FAULT-SQL-02] パブリックアクセス有効 - インターネットからDB直接アクセス可能
+# [FAULT-SQL-03] 暗号化無効(CMEK未設定) - データがデフォルト暗号化のみ
 # [FAULT-SQL-04] 自動バックアップ無効 - データ復旧不能
 # [FAULT-SQL-05] パスワードがハードコード - セキュリティリスク
-# [FAULT-SQL-06] 削除保護なし & データベースフラグ未設定
-# [FAULT-SQL-07] Authorized Networksが0.0.0.0/0 - 全IPからアクセス可能
+# [FAULT-SQL-06] 削除保護なし & 最終スナップショットなし
 ################################################################################
 
 # Cloud SQL インスタンス
@@ -17,79 +16,48 @@ resource "google_sql_database_instance" "main" {
   database_version = "POSTGRES_14"
   region           = var.gcp_region
 
-  # [FAULT-SQL-06] 削除保護なし
+  # [FAULT-SQL-06] 削除保護なし & 最終スナップショットスキップ相当
   deletion_protection = false
 
   settings {
-    # 本番には不十分なスペック
+    # 本番には不十分なスペック (db.t3.micro相当)
     tier = "db-f1-micro"
 
-    # [FAULT-SQL-01] 高可用性が無効 - フェイルオーバー不可
-    availability_type = "ZONAL"  # 本来は "REGIONAL" にすべき
+    # [FAULT-SQL-01] Multi-AZ無効 (ZONAL = 単一ゾーン)
+    availability_type = "ZONAL"
 
-    # ディスク設定
-    disk_size         = 10       # GB - 最小限
-    disk_autoresize   = false    # オートスケーリング無効
-    disk_type         = "PD_HDD" # HDDはSSDより低速
+    # ストレージ設定
+    disk_size       = 10
+    disk_autoresize = false  # オートスケーリング無効
+    disk_type       = "PD_HDD"
 
-    # [FAULT-SQL-04] 自動バックアップ無効
+    # [FAULT-SQL-04] 自動バックアップ無効 (retention = 0 相当)
     backup_configuration {
-      enabled                        = false  # バックアップ無効
-      point_in_time_recovery_enabled = false  # PITR無効
-      # transaction_log_retention_days = 7
-      # backup_retention_settings {
-      #   retained_backups = 7
-      # }
+      enabled                        = false
+      point_in_time_recovery_enabled = false
     }
 
-    # [FAULT-SQL-02] パブリックIPが有効
+    # [FAULT-SQL-02] パブリックアクセス有効
     ip_configuration {
-      ipv4_enabled    = true   # パブリックIP有効 - 本来はfalseにすべき
-      private_network = null   # プライベートネットワーク接続なし
+      ipv4_enabled = true  # パブリックIP有効
+      # private_network未設定 = プライベート接続なし
 
-      # [FAULT-SQL-07] 全IPからのアクセスを許可
+      # 全IPからアクセス許可
       authorized_networks {
         name  = "allow-all"
-        value = "0.0.0.0/0"  # 全世界からアクセス可能
+        value = "0.0.0.0/0"
       }
 
-      # SSL接続を強制しない
       require_ssl = false
     }
 
-    # [FAULT-SQL-06] データベースフラグ未設定
-    # 本来はlog_connections, log_disconnections等を有効にすべき
-    # database_flags {
-    #   name  = "log_connections"
-    #   value = "on"
-    # }
-    # database_flags {
-    #   name  = "log_disconnections"
-    #   value = "on"
-    # }
-    # database_flags {
-    #   name  = "log_min_duration_statement"
-    #   value = "1000"
-    # }
-
-    # メンテナンスウィンドウ未設定
-    # maintenance_window {
-    #   day          = 7  # 日曜日
-    #   hour         = 3  # 午前3時
-    #   update_track = "stable"
-    # }
-
-    # Insights未設定 - クエリパフォーマンス監視不能
+    # パフォーマンスインサイト無効
     insights_config {
-      query_insights_enabled  = false
-      query_plans_per_minute  = 0
-      query_string_length     = 0
-      record_application_tags = false
-      record_client_address   = false
+      query_insights_enabled = false
     }
   }
 
-  # [FAULT-SQL-03] CMEKによるカスタム暗号化なし（Googleデフォルト暗号化のみ）
+  # [FAULT-SQL-03] CMEK暗号化なし（Googleデフォルト暗号化のみ）
   # encryption_key_name = google_kms_crypto_key.sql_key.id
 }
 
@@ -104,5 +72,5 @@ resource "google_sql_database" "main" {
 resource "google_sql_user" "admin" {
   name     = "admin"
   instance = google_sql_database_instance.main.name
-  password = "password123"  # ハードコード - Secret Managerを使うべき
+  password = "password123"
 }

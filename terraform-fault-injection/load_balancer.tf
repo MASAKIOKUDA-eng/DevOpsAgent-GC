@@ -2,11 +2,10 @@
 # Cloud Load Balancing (HTTP(S) ロードバランサー)
 #
 # 注入された障害:
-# [FAULT-LB-01] バックエンドサービスにヘルスチェックが誤ったパスを指定
-# [FAULT-LB-02] バックエンドサービスのポートとコンテナポートの不一致
-# [FAULT-LB-03] SSL証明書なし・HTTPSリダイレクトなし
-# [FAULT-LB-04] Cloud Armorセキュリティポリシー未設定 - DDoS/WAF保護なし
-# [FAULT-LB-05] ログが無効化されている
+# [FAULT-LB-01] Serverless NEGを単一リージョンのみ指定 - 冗長性なし
+# [FAULT-LB-02] ヘルスチェックのパスが存在しないエンドポイント
+# [FAULT-LB-03] バックエンドサービスのポートとコンテナポートの不一致
+# [FAULT-LB-04] アクセスログが無効化されている
 ################################################################################
 
 # 外部IPアドレス
@@ -15,7 +14,8 @@ resource "google_compute_global_address" "lb" {
 }
 
 # ヘルスチェック
-# [FAULT-LB-01] 存在しないヘルスチェックパス
+# [FAULT-LB-02] 存在しないヘルスチェックパス
+# [FAULT-LB-03] コンテナはポート3000で起動するが、ポート8080を指定
 resource "google_compute_health_check" "app" {
   name                = "${var.project_name}-health-check"
   check_interval_sec  = 5
@@ -24,10 +24,22 @@ resource "google_compute_health_check" "app" {
   unhealthy_threshold = 2
 
   http_health_check {
-    # [FAULT-LB-01] アプリは /health で応答するが、/api/healthcheck を指定
+    # [FAULT-LB-02] アプリは /health で応答するが、/api/healthcheck を指定
     request_path = "/api/healthcheck"
-    # [FAULT-LB-02] コンテナはポート3000で起動するが、ポート8080を指定
-    port         = 8080
+    # [FAULT-LB-03] コンテナはポート3000で起動するが、ポート8080を指定
+    port = 8080
+  }
+}
+
+# Serverless NEG (Cloud Run用)
+# [FAULT-LB-01] 単一リージョンのみ
+resource "google_compute_region_network_endpoint_group" "cloud_run_neg" {
+  name                  = "${var.project_name}-neg"
+  network_endpoint_type = "SERVERLESS"
+  region                = var.gcp_region
+
+  cloud_run {
+    service = google_cloud_run_v2_service.app.name
   }
 }
 
@@ -39,66 +51,33 @@ resource "google_compute_backend_service" "app" {
   timeout_sec           = 30
   load_balancing_scheme = "EXTERNAL"
 
-  # [FAULT-LB-05] ログが無効
+  # [FAULT-LB-04] アクセスログ無効 - 監査・トラブルシュート不能
   log_config {
     enable      = false
     sample_rate = 0.0
   }
 
-  # [FAULT-LB-04] Cloud Armorセキュリティポリシー未設定
-  # security_policy = google_compute_security_policy.main.id
-
   backend {
-    group           = google_compute_region_network_endpoint_group.cloud_run_neg.id
-    balancing_mode  = "UTILIZATION"
-    capacity_scaler = 1.0
+    group = google_compute_region_network_endpoint_group.cloud_run_neg.id
   }
 
   health_checks = [google_compute_health_check.app.id]
-}
-
-# Serverless NEG (Cloud Run用)
-resource "google_compute_region_network_endpoint_group" "cloud_run_neg" {
-  name                  = "${var.project_name}-neg"
-  network_endpoint_type = "SERVERLESS"
-  region                = var.gcp_region
-
-  cloud_run {
-    service = google_cloud_run_v2_service.app.name
-  }
 }
 
 # URL Map
 resource "google_compute_url_map" "app" {
   name            = "${var.project_name}-url-map"
   default_service = google_compute_backend_service.app.id
-
-  # パスルールなし - 全トラフィックをデフォルトバックエンドに転送
 }
 
-# HTTP プロキシ (HTTPSなし)
-# [FAULT-LB-03] SSL証明書がなく、HTTPのみで通信 - 暗号化されていない
+# HTTPプロキシ (HTTPSなし - 本来はHTTPSを使用すべき)
 resource "google_compute_target_http_proxy" "app" {
   name    = "${var.project_name}-http-proxy"
   url_map = google_compute_url_map.app.id
 }
 
-# HTTPSプロキシが存在しない
-# 本来は以下が必要:
-# resource "google_compute_target_https_proxy" "app" {
-#   name             = "${var.project_name}-https-proxy"
-#   url_map          = google_compute_url_map.app.id
-#   ssl_certificates = [google_compute_managed_ssl_certificate.app.id]
-# }
-#
-# resource "google_compute_managed_ssl_certificate" "app" {
-#   name = "${var.project_name}-cert"
-#   managed {
-#     domains = ["app.example.com"]
-#   }
-# }
-
 # フォワーディングルール (HTTP のみ)
+# HTTPS へのリダイレクトなし - 本来はHTTPSを使用すべき
 resource "google_compute_global_forwarding_rule" "http" {
   name                  = "${var.project_name}-http-forwarding-rule"
   ip_address            = google_compute_global_address.lb.address
@@ -106,6 +85,3 @@ resource "google_compute_global_forwarding_rule" "http" {
   target                = google_compute_target_http_proxy.app.id
   load_balancing_scheme = "EXTERNAL"
 }
-
-# HTTPSフォワーディングルールが存在しない
-# HTTPからHTTPSへのリダイレクトも設定されていない
